@@ -1,0 +1,4 @@
+-r requirements.txt
+ctranslate2==4.6.0
+sentencepiece==0.2.1
+langid==1.1.6
