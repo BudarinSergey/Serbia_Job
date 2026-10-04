@@ -31,20 +31,22 @@ def route(job):
     return routes or ['other_cities']
 
 
+SECTOR_RULES = [
+    (r'vozac|freight|transport|logistik|magacion|magacin|sklad', '#логистика'),
+    (r'program|developer|software|\bit\b', '#IT'),
+    (r'knjigov|racunov|account|finans', '#финансы'),
+    (r'pravnik|legal|lawyer', '#юриспруденция'),
+    (r'farmace|medicin|lekar|nurse', '#медицина'),
+    (r'kuvar|konobar|sanker|pekar|sobar|hotel', '#общепит_и_гостиницы'),
+    (r'prodav|prodaj|sales|kasir', '#продажи'),
+    (r'elektric|serviser|odrzavanje|tehnicar|proizvod', '#производство_и_сервис'),
+    (r'engineer|inzenjer|gradevin', '#инженерия_и_строительство'),
+]
+
+
 def sector(title):
     title = normalize(title)
-    rules = [
-        (r'vozac|freight|transport|logistik|magacion|magacin|sklad', '#логистика'),
-        (r'program|developer|software|\bit\b', '#IT'),
-        (r'knjigov|racunov|account|finans', '#финансы'),
-        (r'pravnik|legal|lawyer', '#юриспруденция'),
-        (r'farmace|medicin|lekar|nurse', '#медицина'),
-        (r'kuvar|konobar|sanker|pekar|sobar|hotel', '#общепит_и_гостиницы'),
-        (r'prodav|prodaj|sales|kasir', '#продажи'),
-        (r'elektric|serviser|odrzavanje|tehnicar|proizvod', '#производство_и_сервис'),
-        (r'engineer|inzenjer|gradevin', '#инженерия_и_строительство'),
-    ]
-    return next((tag for pattern, tag in rules if re.search(pattern, title)), '#другие_сферы')
+    return next((tag for pattern, tag in SECTOR_RULES if re.search(pattern, title)), "#другие_сферы")
 
 
 def render(job):

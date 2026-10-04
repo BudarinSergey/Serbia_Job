@@ -39,6 +39,8 @@ class ScheduleTests(unittest.TestCase):
         check.assert_called_once()
         hourly.assert_not_called()
 
+    @patch('threading.Thread')
     @patch('main.run_hourly', side_effect=KeyboardInterrupt)
-    def test_stop_is_clean(self, hourly):
+    def test_stop_is_clean(self, hourly, thread):
         self.assertEqual(main.main([]), 0)
+        thread.return_value.start.assert_called_once()

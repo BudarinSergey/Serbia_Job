@@ -58,4 +58,6 @@ def save_batch(batch: JoobleBatch, dsn: str, max_jobs=None) -> int:
                  job.get('company') or None,
                  Jsonb([job['location']]) if job.get('location') else None,
                  job.get('type') or None, batch.fetched_at, batch.fetched_at, snapshot_id, digest, updated_at(job)))
+        from database.jooble_classification import learn_rules
+        learn_rules(conn)
     return len(jobs)

@@ -20,8 +20,8 @@ class JooblePreviewTests(unittest.TestCase):
     def test_daily_salary_and_unknown_languages(self):
         value=prepare(job(),{'salary':'dnevnica 3.500 din','snippet':'<b>Magacioner</b>'},[])
         self.assertEqual(value['four_fields']['salary']['value']['period'],'DAY')
-        self.assertIn('3\u202f500 RSD dnevno',value['body'])
-        self.assertIn('3\u202f500 RSD в день',value['body'])
+        self.assertIn('3\u202f500 RSD',value['body'])
+        self.assertIn('3\u202f500 RSD',value['body'])
         self.assertIn('Языки: не указано',value['body'])
         self.assertIn('Jezici: nije navedeno',value['body'])
         self.assertLess(value['body'].index('🇷🇸'),value['body'].index('🇷🇺'))
@@ -34,12 +34,10 @@ class JooblePreviewTests(unittest.TestCase):
         self.assertIn('требует уточнения',value['body'])
         self.assertNotIn('70\u202f000',value['body'])
 
-    def test_text_salary_no_invented_currency_or_period(self):
-        value=prepare(job(),{'snippet':'<b>Plata</b> 100.000'},[])
-        pay=value['four_fields']['salary']['value']
-        self.assertEqual(pay['min'],'100000')
-        self.assertIsNone(pay['currency'])
-        self.assertIsNone(pay['period'])
+    def test_description_salary_ignored_when_field_empty(self):
+        value=prepare(job(),{'snippet':'Plata 100.000'},[])
+        self.assertEqual(value['four_fields']['salary']['status'],'UNKNOWN')
+        self.assertIsNone(value['four_fields']['salary']['value'])
 
     def test_duplicates_flagged_across_sources_without_removal(self):
         a,b=job(),job('2','infostud')
@@ -52,14 +50,25 @@ class JooblePreviewTests(unittest.TestCase):
 
     def test_untranslated_title_and_unsafe_link(self):
         value=prepare(dict(job(),title='Unreviewed title'),{},[])
-        self.assertFalse(value['body'])
+        self.assertEqual(value['body'].count('Unreviewed title'),1)
         self.assertEqual(value['review_status'],'REVIEW')
+        self.assertEqual(value['category']['status'],'UNKNOWN')
         with self.assertRaises(ValueError):
             render_post(dict(job(),source_url='https://evil.example/jdp/1'))
         with self.assertRaises(ValueError):
             render_post(dict(job(),source='infostud'))
 
-    def test_conflicting_salary_preserved_for_review(self):
-        value=prepare(job(),{'salary':'80.000 din','snippet':'Plata 100.000 din'},[])
-        self.assertEqual(value['four_fields']['salary']['status'],'REVIEW')
-        self.assertEqual(len(value['four_fields']['salary']['evidence']),2)
+    def test_salary_field_is_authoritative_without_description_period(self):
+        value=prepare(job(),{'salary':'500 - 550 din','snippet':'Plata 500 rsd/h'},[])
+        pay=value['four_fields']['salary']
+        self.assertEqual(pay['status'],'KNOWN')
+        self.assertEqual(pay['value']['min'],'500')
+        self.assertEqual(pay['value']['max'],'550')
+        self.assertIsNone(pay['value']['period'])
+        self.assertTrue(all(e['source_path']=='jooble.salary' for e in pay['evidence']))
+        self.assertEqual(value['review_status'],'DRAFT')
+
+    def test_truncated_company_allowed_without_reconstruction(self):
+        value=prepare(job(company='Novotek d...'),{},[])
+        self.assertEqual(value['review_status'],'DRAFT')
+        self.assertIn('Novotek d...',value['body'])

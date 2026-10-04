@@ -23,7 +23,7 @@ class TelegramPreviewTests(unittest.TestCase):
 
     def test_correct_salary_and_safe_html(self):
         body,topics=render_post(self.job())
-        self.assertIn('81\u202f300 RSD в месяц, нетто',body)
+        self.assertIn('81\u202f300 RSD, нетто',body)
         self.assertIn('Английский — не указано',body)
         self.assertIn('Asistent &lt;test&gt;',body)
         self.assertIn('A &amp; B',body)
@@ -43,8 +43,7 @@ class TelegramPreviewTests(unittest.TestCase):
 
     def test_no_unstated_salary_basis(self):
         fields=extract_four('Zaradu u iznosu od 90.000 RSD',{})
-        self.assertIn('период не указан',salary_text(fields))
-        self.assertIn('нетто/брутто не указано',salary_text(fields))
+        self.assertEqual(salary_text(fields),'90\u202f000 RSD')
 
     def test_uncertain_history_takes_priority(self):
         rows=[('infostud','123',1,'sent',42),('infostud','123',2,'uncertain',None)]

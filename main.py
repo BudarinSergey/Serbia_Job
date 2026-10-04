@@ -69,6 +69,12 @@ def main(argv=None) -> int:
             stream.reconfigure(encoding="utf-8")
     parser = argparse.ArgumentParser(description="Получение вакансий Infostud каждый час")
     modes = parser.add_mutually_exclusive_group()
+    modes.add_argument('--search-bot', action='store_true', help='Личный поиск вакансий в Telegram без запуска сборщика')
+    modes.add_argument('--jooble-classify', metavar='ID', help='Назначить категорию по названию и/или место Jooble')
+    from jooble_classification import CATEGORIES
+    parser.add_argument('--category', choices=list(CATEGORIES))
+    parser.add_argument('--cities', help='Города через точку с запятой; пустая строка для только удалённой работы')
+    parser.add_argument('--remote', choices=['yes','no'])
     modes.add_argument('--jooble-review', metavar='ID', help='Сохранить решение по вакансии Jooble')
     parser.add_argument('--decision', choices=['READY','DUPLICATE','NEEDS_INFO'])
     parser.add_argument('--reason', default='')
@@ -90,6 +96,26 @@ def main(argv=None) -> int:
     parser.add_argument("--limit", type=int, choices=range(5, 11), default=10, help="Число вакансий для предпросмотра: 5–10")
     args = parser.parse_args(argv)
     try:
+        if args.search_bot:
+            from telegram_bot.search_bot import serve
+            serve()
+            return 0
+        if args.jooble_classify:
+            from database.jooble_classification import assign
+            from database.postgres import connection_dsn
+            import psycopg
+            try:
+                assign(connection_dsn(),args.jooble_classify,args.category,
+                       args.cities.split(';') if args.cities is not None else None,
+                       args.remote=='yes' if args.remote is not None else None,args.reason)
+            except ValueError as exc:
+                print(str(exc))
+                return 1
+            except psycopg.Error:
+                print('Назначение не сохранено: проверьте PostgreSQL.')
+                return 1
+            print('Назначение сохранено. Следующие совпадающие названия используют ручную категорию. Отправки не было.')
+            return 0
         if args.jooble_review:
             from database.reviews import decide
             from database.postgres import connection_dsn
@@ -136,6 +162,9 @@ def main(argv=None) -> int:
         if args.once:
             return check_once()
         print("Проверка сразу при запуске, затем через час после каждой проверки. Остановка: Ctrl+C или Stop.", flush=True)
+        import threading
+        from telegram_bot.search_bot import serve as run_search
+        threading.Thread(target=run_search, name="telegram-search", daemon=True).start()
         run_hourly()
     except KeyboardInterrupt:
         print("\nПроверка вакансий остановлена.", flush=True)

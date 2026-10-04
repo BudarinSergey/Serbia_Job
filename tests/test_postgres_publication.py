@@ -164,14 +164,14 @@ class PostgresPublicationTests(unittest.TestCase):
         prepare_queue(self.dsn,config=self.config,db_path=self.path)
         self.assertEqual(translate.call_count,2)
         with self.pg.connect(self.dsn) as conn:
-            self.assertIsNone(conn.execute("SELECT format_version FROM serbia_jobs.telegram_outbox WHERE source_id='2'").fetchone()[0])
+            self.assertIsNotNone(conn.execute("SELECT format_version FROM serbia_jobs.telegram_outbox WHERE source_id='2'").fetchone()[0])
             self.assertIsNotNone(conn.execute("SELECT format_version FROM serbia_jobs.telegram_outbox WHERE source_id='5'").fetchone()[0])
             conn.execute("UPDATE serbia_jobs.vacancies SET title='Another phrase' WHERE source_id='5'")
         translate.reset_mock();translate.side_effect=TranslationUnavailable('quota exhausted')
         prepare_queue(self.dsn,config=self.config,db_path=self.path)
         self.assertEqual(translate.call_count,1)
         with self.pg.connect(self.dsn) as conn:
-            self.assertIsNone(conn.execute("SELECT format_version FROM serbia_jobs.telegram_outbox WHERE source_id='5'").fetchone()[0])
+            self.assertIsNotNone(conn.execute("SELECT format_version FROM serbia_jobs.telegram_outbox WHERE source_id='5'").fetchone()[0])
 
     def test_mymemory_daily_budget_and_cooldown(self):
         from telegram_bot.mymemory_translation import reserve,block_quota
@@ -216,7 +216,7 @@ class PostgresPublicationTests(unittest.TestCase):
         translate.side_effect=TranslationUnavailable('HTTP 429')
         prepare_queue(self.dsn,config=self.config,db_path=self.path)
         with self.pg.connect(self.dsn) as conn:
-            self.assertIsNone(conn.execute("SELECT format_version FROM serbia_jobs.telegram_outbox WHERE source_id='2'").fetchone()[0])
+            self.assertIsNotNone(conn.execute("SELECT format_version FROM serbia_jobs.telegram_outbox WHERE source_id='2'").fetchone()[0])
             self.assertIsNotNone(conn.execute("SELECT format_version FROM serbia_jobs.telegram_outbox WHERE source_id='5'").fetchone()[0])
 
     @patch('telegram_bot.automatic_translation.azure_translate',return_value={'sr':'Nova uloga','ru':'Новая должность'})
@@ -294,7 +294,7 @@ class PostgresPublicationTests(unittest.TestCase):
         api.assert_not_called()
 
     @patch('telegram_bot.postgres_publisher.api',side_effect=AssertionError('Must not send unreviewed translation'))
-    def test_missing_translation_holds_job_without_blocking_others(self,api):
+    def test_missing_title_translation_prepares_original_without_blocking_others(self,api):
         from telegram_bot.postgres_publisher import prepare_queue
         self.migrate(); self.normalized()
         with self.pg.connect(self.dsn) as conn:
@@ -303,7 +303,7 @@ class PostgresPublicationTests(unittest.TestCase):
         with self.pg.connect(self.dsn) as conn:
             rows=conn.execute("SELECT source_id,format_version,translation_issue,status FROM serbia_jobs.telegram_outbox WHERE source_id IN ('2','5') ORDER BY source_id").fetchall()
             self.assertEqual(len(rows),2)
-            self.assertTrue(all(r[1] is None and r[2] and r[3]=='pending' for r in rows))
+            self.assertTrue(all(r[1] is not None and r[2] is None and r[3]=='pending' for r in rows))
             conn.execute("UPDATE serbia_jobs.vacancies SET title='Kasir - prodavac' WHERE source_id IN ('2','5')")
         prepare_queue(self.dsn,['5'],self.config,self.path)
         with self.pg.connect(self.dsn) as conn:
@@ -348,3 +348,64 @@ class PostgresPublicationTests(unittest.TestCase):
         self.assertEqual(api.call_count,2)
         with self.pg.connect(self.dsn) as conn:
             self.assertEqual(conn.execute("SELECT status,delivery_issue FROM serbia_jobs.telegram_outbox WHERE source_id='2'").fetchone(),('pending',None))
+
+    def test_jooble_manual_category_reuse_location_expiry_and_pending_reroute(self):
+        import json
+        from datetime import datetime,timezone,timedelta
+        from sources.jooble import JoobleBatch
+        from database.jooble import save_batch
+        from database.jooble_classification import assign,learn_rules
+        from telegram_bot.jooble_preview import build
+        from telegram_bot.postgres_publisher import prepare_queue
+        self.migrate()
+        self.normalized()
+        now=datetime.now(timezone.utc)
+        items=[dict(id=i,title='Novel occupation',company=str(i),location='Beograd',
+                    link=f'https://rs.jooble.org/jdp/{i}') for i in (100,101)]
+        def save():
+            save_batch(JoobleBatch(json.dumps({'jobs':items}).encode(),now,{}),self.dsn)
+        save()
+        self.assertTrue(all(p['category']['status']=='UNKNOWN' for p in build(self.dsn)))
+        assign(self.dsn,'100',category='logistics',reason='Reviewed title')
+        with self.pg.connect(self.dsn) as conn:
+            learn_rules(conn)
+        posts=build(self.dsn)
+        self.assertTrue(all(p['category']['origin']=='MANUAL' for p in posts))
+        self.assertTrue(all(p['review_status']=='DRAFT' for p in posts))
+        prepare_queue(self.dsn,[],self.config,self.path)
+        assign(self.dsn,'100',cities=['Novi Sad'],remote=False,reason='Confirmed workplace')
+        prepare_queue(self.dsn,[],self.config,self.path)
+        with self.pg.connect(self.dsn) as conn:
+            self.assertEqual(conn.execute("SELECT thread_id FROM serbia_jobs.telegram_outbox WHERE source='jooble' AND source_id='100'").fetchall(),[(4,)])
+        # A later advertisement with the same title inherits the manual category.
+        items.append(dict(items[1],id=102,company='102',link='https://rs.jooble.org/jdp/102'))
+        now+=timedelta(seconds=1)
+        items[0]['location']='Unclear village'
+        save()
+        posts={p['source_id']:p for p in build(self.dsn)}
+        self.assertEqual(posts['102']['category']['origin'],'MANUAL')
+        self.assertEqual(posts['100']['location']['status'],'REVIEW')
+        self.assertNotEqual(posts['100']['location']['origin'],'MANUAL')
+        self.assertEqual(posts['100']['review_status'],'REVIEW')
+        with self.pg.connect(self.dsn) as conn:
+            self.assertEqual(conn.execute('SELECT count(*) FROM serbia_jobs.jooble_classification_history').fetchone()[0],2)
+
+    def test_jooble_exclusion_and_manual_russian_title(self):
+        import json
+        from datetime import datetime,timezone
+        from sources.jooble import JoobleBatch
+        from database.jooble import save_batch
+        from telegram_bot.jooble_preview import build
+        self.migrate()
+        item=dict(id=900,title='Magacioner',location='Beograd',link='https://rs.jooble.org/jdp/900')
+        save_batch(JoobleBatch(json.dumps({'jobs':[item]}).encode(),datetime.now(timezone.utc),{}),self.dsn)
+        with self.pg.connect(self.dsn) as conn:
+            conn.execute("UPDATE serbia_jobs.jooble_title_categories SET title_ru='Проверенное название' WHERE title_key='magacioner'")
+            conn.execute("INSERT INTO serbia_jobs.jooble_exclusions(source_id,reason) VALUES ('900','User removed')")
+        post=build(self.dsn)[0]
+        self.assertIn('Проверенное название',post['body'])
+        self.assertIn('Magacioner',post['body'])
+        self.assertEqual(post['review_status'],'EXCLUDED')
+        item['title']='Changed title'
+        save_batch(JoobleBatch(json.dumps({'jobs':[item]}).encode(),datetime.now(timezone.utc),{}),self.dsn)
+        self.assertEqual(build(self.dsn)[0]['review_status'],'EXCLUDED')

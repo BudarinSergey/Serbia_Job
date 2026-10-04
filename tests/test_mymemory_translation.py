@@ -41,3 +41,14 @@ class MyMemoryTests(unittest.TestCase):
         pair=mymemory_translate('Operater u proizvodnji','dsn')
         self.assertEqual(pair,{'sr':'Operater u proizvodnji','ru':'Оператор производства'})
         request.assert_called_once_with('Operater u proizvodnji','sr','ru','dsn')
+
+    def test_source_is_always_configured_serbian(self):
+        from telegram_bot.mymemory_translation import source_language
+        for text in ('Konobar','Kasir','Administrativni radnik','Master / magistratura'):
+            self.assertEqual(source_language(text),'sr')
+
+    @patch('telegram_bot.mymemory_translation.request_translation')
+    def test_long_title_still_requires_review_without_request(self,request):
+        with self.assertRaises(TranslationUnavailable):
+            mymemory_translate('č'*251,'dsn')
+        request.assert_not_called()

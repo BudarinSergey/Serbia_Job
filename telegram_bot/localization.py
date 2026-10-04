@@ -157,11 +157,16 @@ def field_text(fields, key, lang):
         low,high=value.get('min'),value.get('max')
         if low is None and high is None:
             return ('nije navedena','не указана')[i]
-        text=(money(low) if Decimal(low)==Decimal(high) else money(low)+'–'+money(high)) if low is not None and high is not None else ((('od ','от ')[i]+money(low)) if low is not None else (('do ','до ')[i]+money(high)))
-        text+=' '+(value.get('currency') or ('(valuta nije navedena)','(валюта не указана)')[i])
-        period={'MONTH':('mesečno','в месяц'),'HOUR':('po satu','в час'),'DAY':('dnevno','в день'),'YEAR':('godišnje','в год'),None:('(period nije naveden)','(период не указан)')}
-        basis={'NET':('neto','нетто'),'GROSS':('bruto','брутто'),None:('neto/bruto nije navedeno','нетто/брутто не указано')}
-        return text+' '+translate(period,value.get('period'),lang)+', '+translate(basis,value.get('basis'),lang)
+        if low is not None and high is not None:
+            text=money(low) if Decimal(low)==Decimal(high) else money(low)+'–'+money(high)
+        else:
+            text=money(low if low is not None else high)
+        if value.get('currency'):
+            text+=' '+value['currency']
+        basis={'NET':('neto','нетто'),'GROSS':('bruto','брутто')}.get(value.get('basis'))
+        if basis:
+            text+=', '+basis[i]
+        return text
     if key=='languages':
         lines=[]
         for entry in value:
@@ -172,14 +177,21 @@ def field_text(fields, key, lang):
             if text not in lines: lines.append(text)
         return '; '.join(lines)
     if key=='education':
+        import re
         lines=[]
         for entry in value:
-            text=translate(EDUCATION,entry['statement'],lang)
-            if entry.get('bound'):
-                bound={'min':('min. ','мин. '),'max':('maks. ','макс. ')}
-                text=translate(bound,entry['bound'],lang)+text
-            elif entry.get('requirement') in ('PREFERRED','NOT_REQUIRED'):
-                text+=' ('+translate(OBLIGATIONS,entry['requirement'],lang)+')'
-            if text not in lines: lines.append(text)
-        return '; '.join(lines)
+            if entry.get('bound') == 'max':
+                continue
+            statement=re.sub(r'^(?:minimum|min\.?|najmanje|не ниже|минимум|мин\.?)\s+', '', entry['statement'], flags=re.I).strip()
+            if len(statement.encode('utf-8')) > 500:
+                text=('Pogledajte original oglasa','Смотрите оригинал объявления')[i]
+            else:
+                try:
+                    text=translate(EDUCATION,statement,lang)
+                except TranslationRequired:
+                    text=statement
+            text=re.sub(r'^(?:minimum|min\.?|najmanje|не ниже|минимум|мин\.?)\s+', '', text, flags=re.I).strip()
+            if text and text not in lines:
+                lines.append(text)
+        return '; '.join(lines) or ('nije navedeno','не указано')[i]
     raise ValueError('Unexpected field')

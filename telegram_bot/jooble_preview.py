@@ -9,7 +9,7 @@ from urllib.parse import urlsplit, urlunsplit
 import psycopg
 from psycopg.rows import dict_row
 
-from normalization import extract_four, fold, result
+from normalization import extract_four, fold, result, salary
 from telegram_bot.localization import TranslationRequired
 from telegram_bot.preview import render_post, TOPICS
 
@@ -49,34 +49,54 @@ def duplicate_candidates(job, all_jobs):
     return found
 
 
-def prepare(job, original, all_jobs):
+def prepare(job, original, all_jobs, mappings=None, location_decisions=None):
     snippet=text(original.get('snippet'))
-    fields=extract_four(snippet, {'salary':original.get('salary') or ''})
+    fields=extract_four(snippet, {})
+    # Jooble salary field is authoritative; do not infer any pay terms from prose.
+    fields['salary']=salary('', {'salary':original.get('salary') or ''})
     for entry in fields.values():
         for proof in entry['evidence']:
             proof['source_path'] = ('jooble.snippet' if proof['source_path']=='description_original'
                                     else 'jooble.salary')
+    from jooble_classification import category_for, location_for, CATEGORIES, title_key
+    category=category_for(job['title'],mappings)
+    decision=(location_decisions or {}).get(job['source_id'])
+    if decision and decision['content_sha256'] != job.get('content_sha256'):
+        decision=None
+    raw_location=original.get('location')
+    if raw_location is None:
+        raw_location=', '.join(job.get('locations') or [])
+    mode=fields['work_mode']
+    location=location_for(raw_location,snippet,decision,
+        explicit_remote=mode['status']=='KNOWN' and mode['value']=='REMOTE')
     issues=[]
-    salary=fields['salary']
+    if category['status']!='KNOWN':
+        issues.append('Категория не определена однозначно: назначьте её по названию')
+    if location['status']!='KNOWN':
+        issues.append('Место работы требует проверки: '+(', '.join(location['unresolved']) or 'не указано'))
+
+    pay=fields['salary']
     raw_salary=original.get('salary') or ''
-    if salary['status']=='KNOWN':
-        value=salary['value']
+    if pay['status']=='KNOWN':
+        value=pay['value']
         if re.search(r'\bdnevnica\b',fold(raw_salary)):
             value['period']='DAY'
         # A review heuristic, not a corrected amount or a minimum-wage claim.
         amounts=[Decimal(value[k]) for k in ('min','max') if value.get(k) is not None]
         if value.get('currency')=='RSD' and amounts and min(amounts)<100 and not value.get('period'):
-            fields['salary']=result(None,salary['evidence'],'REVIEW')
+            fields['salary']=result(None,pay['evidence'],'REVIEW')
             issues.append('Низкая сумма RSD без периода: '+raw_salary)
     if raw_salary and fields['salary']['status']=='UNKNOWN':
         fields['salary']=result(None,[{'source_path':'jooble.salary','quote':raw_salary}],'REVIEW')
     if fields['salary']['status']=='REVIEW' and not issues:
         issues.append('Зарплата требует проверки по оригиналу')
-    if (job.get('company') or '').endswith(('...','…')):
-        issues.append('Название работодателя обрезано в ответе Jooble')
     duplicates=duplicate_candidates(job,all_jobs)
     # Tie derived data to the actual source snapshot, never to an Infostud detail.
-    prepared=dict(job,four_fields=fields,detail_snapshot_id=job['snapshot_id'],
+    prepared=dict(job,four_fields=fields,classification_topics=location['topics'],
+                  reviewed_title_ru=((mappings or {}).get(title_key(job['title'])) or {}).get('title_ru'),
+                  category_tag=CATEGORIES[category['key']][1] if category['key'] else '#другие_сферы',
+                  locations=location['cities'] + (['Rad na daljinu'] if location['remote'] else []),
+                  detail_snapshot_id=job['snapshot_id'],
                   four_fields_snapshot_id=job['snapshot_id'])
     try:
         body,topics=render_post(prepared)
@@ -85,6 +105,7 @@ def prepare(job, original, all_jobs):
         issues.append(str(exc))
     return {'source_id':job['source_id'],'title':job['title'],'body':body,
             'topics':[TOPICS[k] for k in topics], 'topic_keys':topics, 'four_fields':fields,
+            'category':category,'location':location,
             'snapshot_id':job['snapshot_id'],'issues':issues,'duplicate_candidates':duplicates,
             'content_sha256':job.get('content_sha256'),
             'review_status':'REVIEW' if issues or duplicates else 'DRAFT',
@@ -114,14 +135,20 @@ def _build_from_connection(conn):
             WHERE v.source='jooble' ''').fetchall()
     originals={row['id']:{str(j['id']):j for j in json.loads(bytes(row['raw_content']))['jobs']}
                for row in snapshots}
-    posts=[prepare(job,originals[job['snapshot_id']][job['source_id']],jobs)
+    from database.jooble_classification import load_decisions
+    mappings,location_decisions=load_decisions(conn)
+    posts=[prepare(job,originals[job['snapshot_id']][job['source_id']],jobs,mappings,location_decisions)
             for job in jobs if job['source']=='jooble']
     with conn.cursor(row_factory=dict_row) as cur:
         exists=cur.execute("SELECT to_regclass('serbia_jobs.jooble_reviews') AS name").fetchone()['name']
         reviews=cur.execute('SELECT DISTINCT ON (source_id) * FROM serbia_jobs.jooble_reviews ORDER BY source_id,id DESC').fetchall() if exists else []
     from database.reviews import apply_decision
     by_id={r['source_id']:r for r in reviews}
-    return [apply_decision(p,by_id.get(p['source_id'])) for p in posts]
+    with conn.cursor(row_factory=dict_row) as cur:
+        exists=cur.execute("SELECT to_regclass('serbia_jobs.jooble_exclusions') AS name").fetchone()['name']
+        excluded={r['source_id']:r['reason'] for r in cur.execute('SELECT source_id,reason FROM serbia_jobs.jooble_exclusions').fetchall()} if exists else {}
+    return [dict(p,review_status='EXCLUDED',review_reason=excluded[p['source_id']])
+            if p['source_id'] in excluded else apply_decision(p,by_id.get(p['source_id'])) for p in posts]
 
 
 def write_report(posts, directory):
@@ -130,7 +157,13 @@ def write_report(posts, directory):
     (directory/'jooble-review.json').write_text(json.dumps(posts,ensure_ascii=False,indent=2),encoding='utf-8')
     cards=[]
     for post in posts:
-        notes=([post['review_reason']] if post.get('review_reason') else []) + post['issues'] + [f"Возможный повтор: {x['source']} · {x['title']} · ID {x['id']}"
+        if post['review_status']=='EXCLUDED':
+            continue
+        notes=[f"ID: {post['source_id']} · {post['title']}",
+               'Категория: '+str(post['category']['key'] or 'не определена')+' · '+post['category']['origin'],
+               'Место в оригинале: '+post['location']['original'],
+               'Города: '+(', '.join(post['location']['cities']) or 'не определены')]
+        notes+=([post['review_reason']] if post.get('review_reason') else []) + post['issues'] + [f"Возможный повтор: {x['source']} · {x['title']} · ID {x['id']}"
                                  for x in post['duplicate_candidates']]
         cards.append('<article><aside>'+escape(post['review_status']+' · '+', '.join(post['topics']))+
                      '</aside><div class="post">'+post['body'].replace('\n','<br>')+'</div><footer>'+

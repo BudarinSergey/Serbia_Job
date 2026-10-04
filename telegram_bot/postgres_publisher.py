@@ -10,6 +10,10 @@ from telegram_bot.preview import render_post, destinations
 from telegram_bot.localization import TranslationRequired
 
 FORMAT_VERSION = 'four-fields-sr-ru-v1'
+SEARCH_BUTTON = {'inline_keyboard': [[{
+    'text': '🔎 Искать вакансии / Pronađi posao',
+    'url': 'https://t.me/SerbiaJob_bot?start=search',
+}]]}
 
 
 def config_from_file():
@@ -104,6 +108,8 @@ def _prepare_posts_translated(conn, config, source_ids):
 
 def _prepare_jooble(conn, config):
     from telegram_bot.jooble_preview import build_from_connection
+    from database.jooble_classification import learn_rules
+    learn_rules(conn)
     chat=config['chat_id']
     # Disable all old pending drafts before evaluating the latest saved originals.
     conn.execute('''UPDATE serbia_jobs.telegram_outbox SET format_version=NULL,
@@ -119,17 +125,18 @@ def _prepare_jooble(conn, config):
             WHERE chat_id=%s AND source='jooble' AND source_id=%s''',(chat,ident)).fetchall()
         if any(row[0] in ('sent','sending','uncertain') for row in history):
             continue
-        if history:
-            conn.execute('''UPDATE serbia_jobs.telegram_outbox SET body=%s,
-                format_version=%s,translation_issue=NULL WHERE chat_id=%s
-                AND source='jooble' AND source_id=%s AND status='pending' ''',
-                (post['body'],FORMAT_VERSION,chat,ident))
-        else:
-            for key in post['topic_keys']:
-                conn.execute('''INSERT INTO serbia_jobs.telegram_outbox
-                    (chat_id,source,source_id,thread_id,body,status,format_version)
-                    VALUES (%s,'jooble',%s,%s,%s,'pending',%s) ON CONFLICT DO NOTHING''',
-                    (chat,ident,config['topics'][key]['message_thread_id'],post['body'],FORMAT_VERSION))
+        # Only untouched pending messages may be rerouted after a manual correction.
+        # Sent/sending/uncertain vacancies were excluded above.
+        threads=[config['topics'][key]['message_thread_id'] for key in post['topic_keys']]
+        conn.execute("DELETE FROM serbia_jobs.telegram_outbox WHERE chat_id=%s AND source='jooble' AND source_id=%s AND status='pending' AND NOT (thread_id=ANY(%s))",(chat,ident,threads))
+        for thread in threads:
+            conn.execute("""INSERT INTO serbia_jobs.telegram_outbox
+                (chat_id,source,source_id,thread_id,body,status,format_version)
+                VALUES (%s,'jooble',%s,%s,%s,'pending',%s)
+                ON CONFLICT (chat_id,source,source_id,thread_id) DO UPDATE SET
+                body=EXCLUDED.body,format_version=EXCLUDED.format_version,translation_issue=NULL
+                WHERE telegram_outbox.status='pending' """,
+                (chat,ident,thread,post['body'],FORMAT_VERSION))
     if held:
         print(f'Jooble: {held} объявлений оставлено на проверке данных или возможных дублей.',flush=True)
 
@@ -180,7 +187,8 @@ def publish(dsn, source_ids=None, config=None, db_path=DEFAULT_DB_PATH):
                 continue
             try:
                 result=api('sendMessage',chat_id=config['chat_id'],message_thread_id=thread,
-                           text=body,parse_mode='HTML',link_preview_options={'is_disabled':True},disable_notification=True)
+                           text=body,parse_mode='HTML',link_preview_options={'is_disabled':True},
+                           disable_notification=True,reply_markup=SEARCH_BUTTON)
             except TelegramError as exc:
                 if exc.message_specific and not exc.uncertain:
                     conn.execute("UPDATE serbia_jobs.telegram_outbox SET status='pending',delivery_issue=%s WHERE id=%s",

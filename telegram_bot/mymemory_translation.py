@@ -1,6 +1,5 @@
 """MyMemory without credentials/email; conservative persistent usage accounting."""
 from datetime import datetime,timezone,timedelta
-from functools import lru_cache
 from html import unescape
 import requests
 import psycopg
@@ -14,22 +13,9 @@ SCHEMA='''CREATE TABLE IF NOT EXISTS serbia_jobs.mymemory_usage (
  blocked_until TIMESTAMPTZ)'''
 
 
-@lru_cache(maxsize=1)
-def detector():
-    from langid.langid import LanguageIdentifier,model
-    instance=LanguageIdentifier.from_modelstring(model,norm_probs=True)
-    instance.set_languages(['en','sr','ru','hr','bs'])
-    return instance
-
-
 def source_language(text):
-    scores={'en':0.0,'sr':0.0,'ru':0.0}
-    for lang,score in detector().rank(text):
-        scores[{'hr':'sr','bs':'sr'}.get(lang,lang)]+=score
-    source=max(scores,key=scores.get)
-    if scores[source]<0.7:
-        raise TranslationNeedsReview('MyMemory: исходный язык требует проверки')
-    return source
+    """Configured source language: Serbian Latin, without probabilistic detection."""
+    return 'sr'
 
 
 def reserve(dsn,characters):

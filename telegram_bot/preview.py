@@ -30,20 +30,8 @@ def money(value):
 
 
 def salary_text(fields):
-    value, missing = known(fields, 'salary')
-    if not value:
-        return missing
-    low, high = value.get('min'), value.get('max')
-    if low is None and high is None:
-        return 'не указана'
-    if low is not None and high is not None:
-        text = money(low) if Decimal(low)==Decimal(high) else money(low)+'–'+money(high)
-    else:
-        text = ('от '+money(low)) if low is not None else ('до '+money(high))
-    text += ' '+(value.get('currency') or '(валюта не указана)')
-    text += ' '+{'MONTH':'в месяц','HOUR':'в час','DAY':'в день','YEAR':'в год',None:'(период не указан)'}.get(value.get('period'),'(период не указан)')
-    text += ', '+{'NET':'нетто','GROSS':'брутто',None:'нетто/брутто не указано'}.get(value.get('basis'),'нетто/брутто не указано')
-    return text
+    from telegram_bot.localization import field_text
+    return field_text(fields, 'salary', 'ru')
 
 
 def language_text(fields):
@@ -57,6 +45,8 @@ def education_text(fields):
 
 
 def destinations(job):
+    if job.get('source')=='jooble' and 'classification_topics' in job:
+        return job['classification_topics']
     mode, _ = known(job.get('four_fields'), 'work_mode')
     if mode=='REMOTE':
         return ['remote']
@@ -82,15 +72,22 @@ def render_post(job):
     location=', '.join(job.get('locations') or []) or 'Mesto nije navedeno'
     topic_keys=destinations(dict(job,four_fields=fields))
     tags=[{'belgrade':'#Beograd','novi_sad':'#NoviSad','other_cities':'#DrugiGradovi','remote':'#Remote'}[key] for key in topic_keys]
-    category=sector(job['title'])
+    category=job.get('category_tag') or sector(job['title'])
     sr_category={'#логистика':'#Logistika','#IT':'#IT','#финансы':'#Finansije','#юриспруденция':'#Pravo',
                  '#медицина':'#Medicina','#общепит_и_гостиницы':'#Ugostiteljstvo','#продажи':'#Prodaja',
                  '#производство_и_сервис':'#ProizvodnjaIServis','#инженерия_и_строительство':'#InzenjerstvoIGradjevina',
                  '#другие_сферы':'#OstaleOblasti'}[category]
     tags.extend(dict.fromkeys((sr_category,category)))
-    lines=[f"💼 <b>{escape(translate(TITLES,job['title'],'sr'))}</b>",
-           f"<b>{escape(translate(TITLES,job['title'],'ru'))}</b>", '',
-           '🏢 '+escape(company[:250]), '📍 '+escape(location[:250])]
+    try:
+        titles=([job['title'],job['reviewed_title_ru']] if job.get('reviewed_title_ru')
+                else [translate(TITLES,job['title'],lang) for lang in ('sr','ru')])
+    except TranslationRequired:
+        # The original title is publishable; never substitute an invented translation.
+        titles=[job['title']]
+    titles=list(dict.fromkeys(titles))
+    lines=[('💼 ' if index==0 else '')+'<b>'+escape(title)+'</b>'
+           for index,title in enumerate(titles)]
+    lines.extend(['', '🏢 '+escape(company[:250]), '📍 '+escape(location[:250])])
     labels={'sr':('🇷🇸','Zarada','Jezici','Obrazovanje','Način rada'),
             'ru':('🇷🇺','Зарплата','Языки','Образование','Формат работы')}
     for lang in ('sr','ru'):
@@ -102,9 +99,6 @@ def render_post(job):
             '🏠 '+mode+': '+escape(field_text(fields,'work_mode',lang))])
     if job.get('detail_status')=='IMAGE_ONLY':
         lines.extend(['','📄 Opis je u slici — proverite original.','Описание размещено изображением — проверьте оригинал.'])
-    if source=='jooble':
-        lines.extend(['','📄 Podaci iz kratkog opisa Jooble — proverite ceo oglas.',
-                      'Данные из краткого описания Jooble — проверьте полное объявление.'])
     lines += ['', f'<a href="{escape(url,quote=True)}">Detaljnije / Prijavite se · Подробнее / Откликнуться</a>', '', ' '.join(tags)]
     body='\n'.join(lines)
     # Conservative bound: raw HTML length in UTF-16 exceeds displayed text length.
